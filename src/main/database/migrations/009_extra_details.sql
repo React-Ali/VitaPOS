@@ -1,0 +1,7 @@
+ALTER TABLE customers ADD COLUMN email TEXT;
+ALTER TABLE customers ADD COLUMN address TEXT;
+ALTER TABLE customers ADD COLUMN notes TEXT;
+
+ALTER TABLE doctors ADD COLUMN specialty TEXT;
+ALTER TABLE doctors ADD COLUMN email TEXT;
+ALTER TABLE doctors ADD COLUMN notes TEXT;

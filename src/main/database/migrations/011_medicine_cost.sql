@@ -1,0 +1,1 @@
+ALTER TABLE medicines ADD COLUMN purchase_price REAL DEFAULT 0;
