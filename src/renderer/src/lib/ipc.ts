@@ -1,12 +1,17 @@
 export const ipc = {
-  auth: { login: (u: string, p: string) => window.api.auth.login(u, p) },
+  auth: { 
+    login: (u: string, p: string) => window.api.auth.login(u, p),
+    reset: (u: string, p: string, key: string) => window.api.auth.reset(u, p, key),
+    generateCode: (username: string) => window.api.auth.generateCode(username)
+  },
   medicine: {
     search: (q: string) => window.api.medicine.search(q), 
     list: () => window.api.medicine.list(),
     create: (i: any, uid: number) => window.api.medicine.create(i, uid),
     update: (id: number, i: any, uid: number) => window.api.medicine.update(id, i, uid),
     delete: (id: number, uid: number) => window.api.medicine.delete(id, uid),
-    batches: (id: number) => window.api.medicine.batches(id)
+    batches: (id: number) => window.api.medicine.batches(id),
+    getByBarcode: (code: string) => window.api.medicine.getByBarcode(code)
   },
   sales: { 
     create: (i: any, uid: number) => window.api.sales.create(i, uid),
@@ -85,6 +90,14 @@ export const ipc = {
   },
   audit: { 
     logs: () => window.api.audit.logs() 
+  },
+  network: {
+    get: () => window.api.network.get(),
+    set: (config: any) => window.api.network.set(config),
+    test: () => window.api.network.test()
+  },
+  app: {
+    relaunch: () => window.api.app.relaunch()
   }
 }
 

@@ -1,14 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 const api = {
-  auth: { login: (u: string, p: string) => ipcRenderer.invoke('auth:login', u, p) },
+  auth: { 
+    login: (u: string, p: string) => ipcRenderer.invoke('auth:login', u, p),
+    reset: (u: string, p: string, key: string) => ipcRenderer.invoke('auth:reset', u, p, key),
+    generateCode: (username: string) => ipcRenderer.invoke('auth:generateCode', username)
+  },
   medicine: {
     search: (q: string) => ipcRenderer.invoke('medicine:search', q), 
     list: () => ipcRenderer.invoke('medicine:list'),
     create: (i: any, uid: number) => ipcRenderer.invoke('medicine:create', i, uid),
     update: (id: number, i: any, uid: number) => ipcRenderer.invoke('medicine:update', id, i, uid),
     delete: (id: number, uid: number) => ipcRenderer.invoke('medicine:delete', id, uid),
-    batches: (id: number) => ipcRenderer.invoke('medicine:batches', id)
+    batches: (id: number) => ipcRenderer.invoke('medicine:batches', id),
+    getByBarcode: (code: string) => ipcRenderer.invoke('medicine:barcode', code)
   },
   sales: { 
     create: (i: any, uid: number) => ipcRenderer.invoke('sales:create', i, uid),
@@ -87,6 +92,14 @@ const api = {
   },
   audit: { 
     logs: () => ipcRenderer.invoke('audit:logs') 
+  },
+  network: {
+    get: () => ipcRenderer.invoke('network:get'),
+    set: (config: any) => ipcRenderer.invoke('network:set', config),
+    test: () => ipcRenderer.invoke('network:test')
+  },
+  app: {
+    relaunch: () => ipcRenderer.invoke('app:relaunch')
   }
 }
 

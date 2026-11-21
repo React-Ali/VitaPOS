@@ -5,6 +5,8 @@ const Database = require("better-sqlite3");
 const fs = require("fs");
 const bcrypt = require("bcryptjs");
 const nanoid = require("nanoid");
+const express = require("express");
+const cors = require("cors");
 const log = require("electron-log/main");
 const is = {
   dev: !electron.app.isPackaged
@@ -107,7 +109,6 @@ function createWindow() {
     show: false,
     autoHideMenuBar: true,
     icon,
-    // <--- THIS LINE IS CRITICAL
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       sandbox: false,
@@ -115,7 +116,9 @@ function createWindow() {
       nodeIntegration: false
     }
   });
-  win.on("ready-to-show", () => win.show());
+  win.maximize();
+  win.show();
+  win.focus();
   win.webContents.setWindowOpenHandler((details) => {
     electron.shell.openExternal(details.url);
     return { action: "deny" };
@@ -194,25 +197,12 @@ function runSeed() {
     console.log("[seed] Default admin user created: admin / admin123");
   }
   const medCount = db2.prepare("SELECT COUNT(*) as c FROM medicines").get();
-  if (medCount.c === 0) {
-    const insertMed = db2.prepare(
-      `INSERT INTO medicines (name, generic_name, brand, category, unit, pack_size, mrp, schedule, product_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    insertMed.run("Panadol 500mg", "Paracetamol", "GSK", "Analgesic", "tablet", 10, 55, "none", "Human");
-    insertMed.run("Augmentin 625mg", "Amoxicillin+Clavulanate", "GSK", "Antibiotic", "tablet", 6, 480, "H", "Human");
-    insertMed.run("Morphine 10mg", "Morphine Sulfate", "Generic", "Narcotic", "ampoule", 1, 350, "G", "Human");
-    insertMed.run("Pet Multivitamin", "Multivitamin", "VetCare", "Supplement", "bottle", 1, 450, "none", "Vet");
-    insertMed.run("Chocolate Fudge Cake", "Bakery", "Local", "Cake", "piece", 1, 850, "none", "Bakery");
-    const insertBatch = db2.prepare(
-      `INSERT INTO batches (medicine_id, batch_no, expiry_date, qty, cost_price) VALUES (?, ?, ?, ?, ?)`
-    );
-    insertBatch.run(1, "PN2024A", "2026-12-31", 500, 40);
-    insertBatch.run(2, "AU2024B", "2026-06-30", 120, 380);
-    insertBatch.run(3, "MO2024C", "2026-03-31", 20, 280);
-    insertBatch.run(4, "VT2024A", "2026-12-31", 50, 300);
-    insertBatch.run(5, "BK2024A", "2024-12-31", 10, 500);
-    console.log("[seed] Default products and batches created.");
+  if (medCount.c === 0) ;
+  const keyCheck = db2.prepare("SELECT value FROM settings WHERE key = ?").get("master_recovery_key");
+  if (!keyCheck) {
+    const uniqueMasterKey = `VITA-${nanoid.nanoid(4).toUpperCase()}-${nanoid.nanoid(4).toUpperCase()}-${nanoid.nanoid(4).toUpperCase()}`;
+    db2.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run("master_recovery_key", uniqueMasterKey);
+    console.log("[seed] Unique Master Recovery Key generated:", uniqueMasterKey);
   }
   db2.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run("shop_name", "VitaPOS");
   db2.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run("shop_phone", "0300-1234567");
@@ -220,29 +210,60 @@ function runSeed() {
   db2.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run("receipt_footer", "Thank you for your business! Get well soon.");
   db2.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run("low_stock_threshold", "10");
 }
+const loginAttempts = /* @__PURE__ */ new Map();
+const tempRecoveryCodes = /* @__PURE__ */ new Map();
 const authService = {
   login(username, password) {
     const db2 = getDb();
+    const attempt = loginAttempts.get(username);
+    if (attempt && attempt.lockoutUntil > Date.now()) {
+      const minsLeft = Math.ceil((attempt.lockoutUntil - Date.now()) / 6e4);
+      throw new Error(`Account locked. Try again in ${minsLeft} minute(s).`);
+    }
     const row = db2.prepare("SELECT * FROM users WHERE username = ? AND is_active = 1").get(username);
-    if (!row) throw new Error("Invalid credentials");
-    if (!bcrypt.compareSync(password, row.password_hash)) throw new Error("Invalid credentials");
+    if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+      const currentAttempts = attempt ? attempt.count + 1 : 1;
+      if (currentAttempts >= 5) {
+        loginAttempts.set(username, { count: 0, lockoutUntil: Date.now() + 6e4 });
+        throw new Error("Too many failed attempts. Account locked for 1 minute.");
+      } else {
+        loginAttempts.set(username, { count: currentAttempts, lockoutUntil: 0 });
+        throw new Error("Invalid credentials");
+      }
+    }
+    loginAttempts.delete(username);
     const token = nanoid.nanoid(32);
     db2.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, row.id);
-    return {
-      token,
-      user: { id: row.id, username: row.username, full_name: row.full_name, role: row.role }
-    };
+    return { token, user: { id: row.id, username: row.username, full_name: row.full_name, role: row.role } };
+  },
+  generateRecoveryCode(username) {
+    const code = Math.floor(1e5 + Math.random() * 9e5).toString();
+    tempRecoveryCodes.set(username, { code, expiresAt: Date.now() + 15 * 6e4 });
+    return code;
+  },
+  resetPassword(username, newPassword, recoveryKey) {
+    const db2 = getDb();
+    const masterKeyRow = db2.prepare("SELECT value FROM settings WHERE key = ?").get("master_recovery_key");
+    const isMasterFailsafe = masterKeyRow && recoveryKey === masterKeyRow.value;
+    const tempData = tempRecoveryCodes.get(username);
+    const isTempValid = tempData && tempData.code === recoveryKey && tempData.expiresAt > Date.now();
+    if (!isMasterFailsafe && !isTempValid) {
+      throw new Error("Invalid or expired recovery key.");
+    }
+    const user = db2.prepare("SELECT id FROM users WHERE username = ?").get(username);
+    if (!user) throw new Error("User not found.");
+    const hash = bcrypt.hashSync(newPassword, 10);
+    db2.prepare("UPDATE users SET password_hash = ? WHERE username = ?").run(hash, username);
+    tempRecoveryCodes.delete(username);
+    return { success: true };
   },
   logout(token) {
     getDb().prepare("DELETE FROM sessions WHERE token = ?").run(token);
   },
   getUserByToken(token) {
-    const row = getDb().prepare(
-      `SELECT u.id, u.username, u.full_name, u.role
-         FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token = ?`
-    ).get(token);
-    return row ?? null;
+    return getDb().prepare(
+      `SELECT u.id, u.username, u.full_name, u.role FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`
+    ).get(token) || null;
   }
 };
 const medicineService = {
@@ -259,6 +280,17 @@ const medicineService = {
          GROUP BY m.id ORDER BY m.name LIMIT 100`
     ).all(q, q, q);
   },
+  // NEW: Fast exact match for barcode scanners
+  getByBarcode(barcode) {
+    const db2 = getDb();
+    return db2.prepare(
+      `SELECT m.*, COALESCE(SUM(b.qty), 0) AS total_qty
+       FROM medicines m
+       LEFT JOIN batches b ON b.medicine_id = m.id AND b.qty > 0
+       WHERE m.is_active = 1 AND m.barcode = ?
+       GROUP BY m.id`
+    ).get(barcode);
+  },
   listAll() {
     return this.search("");
   },
@@ -268,7 +300,7 @@ const medicineService = {
     const res = db2.prepare(
       `INSERT INTO medicines (name, generic_name, brand, category, unit, pack_size, barcode, mrp, purchase_price, schedule, product_type)
        VALUES (@name, @generic_name, @brand, @category, @unit, @pack_size, @barcode, @mrp, @purchase_price, @schedule, @product_type)`
-    ).run({ ...input, barcode: cleanBarcode, product_type: input.product_type || "Human" });
+    ).run({ ...input, barcode: cleanBarcode });
     return Number(res.lastInsertRowid);
   },
   update(id, input, userId) {
@@ -278,13 +310,15 @@ const medicineService = {
       `UPDATE medicines SET name=@name, generic_name=@generic_name, brand=@brand, 
        category=@category, unit=@unit, pack_size=@pack_size, barcode=@barcode, 
        mrp=@mrp, purchase_price=@purchase_price, schedule=@schedule, product_type=@product_type WHERE id=@id`
-    ).run({ ...input, barcode: cleanBarcode, product_type: input.product_type || "Human", id });
+    ).run({ ...input, barcode: cleanBarcode, id });
   },
   delete(id, userId) {
     getDb().prepare("UPDATE medicines SET is_active = 0 WHERE id = ?").run(id);
   },
   getBatches(medicineId) {
-    return getDb().prepare(`SELECT id, batch_no, expiry_date, qty, cost_price FROM batches WHERE medicine_id = ? AND qty > 0 ORDER BY expiry_date ASC`).all(medicineId);
+    return getDb().prepare(
+      `SELECT id, batch_no, expiry_date, qty, cost_price FROM batches WHERE medicine_id = ? AND qty > 0 ORDER BY expiry_date ASC`
+    ).all(medicineId);
   }
 };
 const mrpService = {
@@ -470,24 +504,11 @@ const dashboardService = {
       WHERE date(s.created_at, 'localtime') >= date('now', '-30 days', 'localtime') GROUP BY m.id ORDER BY total_qty DESC LIMIT 5
     `).all();
     const salesTrend = db2.prepare(`
-      SELECT 
-        date(created_at, 'localtime') as date, 
-        COALESCE(SUM(total), 0) as sales 
-      FROM sales 
-      WHERE date(created_at, 'localtime') >= date('now', '-7 days', 'localtime')
-      GROUP BY date 
-      ORDER BY date ASC
+      SELECT date(created_at, 'localtime') as date, COALESCE(SUM(total), 0) as sales 
+      FROM sales WHERE date(created_at, 'localtime') >= date('now', '-7 days', 'localtime')
+      GROUP BY date ORDER BY date ASC
     `).all();
-    return {
-      salesToday: { amount: netRevenue, count: salesToday.count },
-      refundsToday: refundsToday.amount,
-      totalMedicines,
-      lowStock,
-      expiringSoon,
-      totalCustomers,
-      topSelling,
-      salesTrend
-    };
+    return { salesToday: { amount: netRevenue, count: salesToday.count }, refundsToday: refundsToday.amount, totalMedicines, lowStock, expiringSoon, totalCustomers, topSelling, salesTrend };
   },
   getAlerts() {
     const db2 = getDb();
@@ -497,13 +518,13 @@ const dashboardService = {
       SELECT m.name, COALESCE(SUM(b.qty), 0) AS qty 
       FROM medicines m LEFT JOIN batches b ON b.medicine_id = m.id 
       WHERE m.is_active = 1
-      GROUP BY m.id HAVING COALESCE(SUM(b.qty), 0) <= ? ORDER BY COALESCE(SUM(b.qty), 0) ASC LIMIT 10
+      GROUP BY m.id HAVING COALESCE(SUM(b.qty), 0) <= ? ORDER BY COALESCE(SUM(b.qty), 0) ASC
     `).all(threshold);
     const expiringItems = db2.prepare(`
       SELECT b.batch_no, b.expiry_date, b.qty, m.name as medicine_name 
       FROM batches b JOIN medicines m ON m.id = b.medicine_id 
       WHERE b.qty > 0 AND date(b.expiry_date) <= date('now', '+90 days', 'localtime') AND m.is_active = 1
-      ORDER BY b.expiry_date ASC LIMIT 10
+      ORDER BY b.expiry_date ASC
     `).all();
     return { lowStockItems, expiringItems };
   }
@@ -879,78 +900,345 @@ async function manualBackup() {
   }
   return false;
 }
+const configPath = path.join(electron.app.getPath("userData"), "network-config.json");
+const defaultConfig = { mode: "master", masterIp: "192.168.1.100" };
+const configService = {
+  get() {
+    if (!fs.existsSync(configPath)) return defaultConfig;
+    try {
+      return JSON.parse(fs.readFileSync(configPath, "utf8"));
+    } catch {
+      return defaultConfig;
+    }
+  },
+  set(config) {
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+  }
+};
+async function callMasterServer(channel, args) {
+  const config = configService.get();
+  const url = `http://${config.masterIp}:3001/rpc`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5e3);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, args }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errData = await response.json();
+      throw new Error(errData.error || `Connection refused by Master PC at ${config.masterIp}`);
+    }
+    const json = await response.json();
+    if (!json.success) throw new Error(json.error);
+    return json.data;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === "AbortError") {
+      throw new Error("Connection timed out. Master PC is off, or blocked by Firewall.");
+    }
+    throw error;
+  }
+}
 function registerIpc() {
-  electron.ipcMain.handle("auth:login", (_e, u, p) => authService.login(u, p));
-  electron.ipcMain.handle("medicine:search", (_e, q) => medicineService.search(q));
-  electron.ipcMain.handle("medicine:list", () => medicineService.listAll());
-  electron.ipcMain.handle("medicine:create", (_e, i, uid) => medicineService.create(i, uid));
-  electron.ipcMain.handle("medicine:update", (_e, id, i, uid) => medicineService.update(id, i, uid));
-  electron.ipcMain.handle("medicine:delete", (_e, id, uid) => medicineService.delete(id, uid));
-  electron.ipcMain.handle("medicine:batches", (_e, id) => medicineService.getBatches(id));
-  electron.ipcMain.handle("sales:create", (_e, i, uid) => salesService.create(i, uid));
-  electron.ipcMain.handle("sales:history", () => salesService.getHistory());
-  electron.ipcMain.handle("sales:details", (_e, id) => salesService.getSaleDetails(id));
-  electron.ipcMain.handle("sales:delete", (_e, id, uid) => salesService.deleteSale(id, uid));
-  electron.ipcMain.handle("inventory:addStock", (_e, i, uid) => inventoryService.addStock(i));
-  electron.ipcMain.handle("inventory:purchases", () => inventoryService.getPurchaseHistory());
-  electron.ipcMain.handle("inventory:updateBatch", (_e, id, i) => inventoryService.updateBatch(id, i));
-  electron.ipcMain.handle("inventory:deleteBatch", (_e, id) => inventoryService.deleteBatch(id));
-  electron.ipcMain.handle("inventory:adjust", (_e, bId, qty, type, notes, uid) => inventoryService.adjustStock(bId, qty, type, notes, uid));
-  electron.ipcMain.handle("inventory:lowStock", () => inventoryService.getLowStock());
-  electron.ipcMain.handle("inventory:expiring", () => inventoryService.getExpiring());
-  electron.ipcMain.handle("inventory:returnHistory", () => inventoryService.getReturnHistory());
-  electron.ipcMain.handle("dashboard:stats", () => dashboardService.stats());
-  electron.ipcMain.handle("dashboard:alerts", () => dashboardService.getAlerts());
-  electron.ipcMain.handle("user:list", () => userService.list());
-  electron.ipcMain.handle("user:create", (_e, i) => userService.create(i));
-  electron.ipcMain.handle("user:update", (_e, id, i) => userService.update(id, i));
-  electron.ipcMain.handle("user:toggle", (_e, id, a) => userService.toggleActive(id, a));
-  electron.ipcMain.handle("user:delete", (_e, id) => userService.delete(id));
+  const handle = (channel, localFunction) => {
+    electron.ipcMain.handle(channel, async (_e, ...args) => {
+      const config = configService.get();
+      if (config.mode === "client") {
+        return await callMasterServer(channel, args);
+      }
+      return localFunction(...args);
+    });
+  };
+  handle("auth:login", (u, p) => authService.login(u, p));
+  handle("auth:reset", (u, p, key) => authService.resetPassword(u, p, key));
+  handle("auth:generateCode", (username) => authService.generateRecoveryCode(username));
+  handle("medicine:search", (q) => medicineService.search(q));
+  handle("medicine:list", () => medicineService.listAll());
+  handle("medicine:create", (i, uid) => medicineService.create(i, uid));
+  handle("medicine:update", (id, i, uid) => medicineService.update(id, i, uid));
+  handle("medicine:delete", (id, uid) => medicineService.delete(id, uid));
+  handle("medicine:batches", (id) => medicineService.getBatches(id));
+  handle("medicine:barcode", (code) => medicineService.getByBarcode(code));
+  handle("sales:create", (i, uid) => salesService.create(i, uid));
+  handle("sales:history", () => salesService.getHistory());
+  handle("sales:details", (id) => salesService.getSaleDetails(id));
+  handle("sales:delete", (id, uid) => salesService.deleteSale(id, uid));
+  handle("inventory:addStock", (i, uid) => inventoryService.addStock(i));
+  handle("inventory:purchases", () => inventoryService.getPurchaseHistory());
+  handle("inventory:updateBatch", (id, i) => inventoryService.updateBatch(id, i));
+  handle("inventory:deleteBatch", (id) => inventoryService.deleteBatch(id));
+  handle("inventory:adjust", (bId, qty, type, notes, uid) => inventoryService.adjustStock(bId, qty, type, notes, uid));
+  handle("inventory:lowStock", () => inventoryService.getLowStock());
+  handle("inventory:expiring", () => inventoryService.getExpiring());
+  handle("inventory:returnHistory", () => inventoryService.getReturnHistory());
+  handle("dashboard:stats", () => dashboardService.stats());
+  handle("dashboard:alerts", () => dashboardService.getAlerts());
+  handle("user:list", () => userService.list());
+  handle("user:create", (i) => userService.create(i));
+  handle("user:update", (id, i) => userService.update(id, i));
+  handle("user:toggle", (id, a) => userService.toggleActive(id, a));
+  handle("user:delete", (id) => userService.delete(id));
   electron.ipcMain.handle("print:receipt", (_e, html) => printReceipt(html));
   electron.ipcMain.handle("print:a4", (_e, html) => printA4(html));
-  electron.ipcMain.handle("settings:get", () => settingsService.getAll());
-  electron.ipcMain.handle("settings:update", (_e, k, v) => settingsService.update(k, v));
+  handle("settings:get", () => settingsService.getAll());
+  handle("settings:update", (k, v) => settingsService.update(k, v));
   electron.ipcMain.handle("system:backup", () => manualBackup());
   electron.ipcMain.handle("system:heal", () => systemService.healDatabase());
-  electron.ipcMain.handle("customer:list", () => customerService.list());
-  electron.ipcMain.handle("customer:create", (_e, c) => customerService.create(c));
-  electron.ipcMain.handle("customer:update", (_e, id, c) => customerService.update(id, c));
-  electron.ipcMain.handle("customer:delete", (_e, id) => customerService.delete(id));
-  electron.ipcMain.handle("customer:ledger", (_e, id) => customerService.getLedger(id));
-  electron.ipcMain.handle("customer:pay", (_e, id, amount, notes, date) => customerService.addPayment(id, amount, notes, date));
-  electron.ipcMain.handle("supplier:list", () => supplierService.list());
-  electron.ipcMain.handle("supplier:create", (_e, i) => supplierService.create(i));
-  electron.ipcMain.handle("supplier:delete", (_e, id) => supplierService.delete(id));
-  electron.ipcMain.handle("supplier:ledger", (_e, id) => supplierService.getLedger(id));
-  electron.ipcMain.handle("supplier:pay", (_e, id, amount, notes) => supplierService.addPayment(id, amount, notes));
-  electron.ipcMain.handle("expense:list", () => getDb().prepare("SELECT * FROM expenses ORDER BY id DESC").all());
-  electron.ipcMain.handle("expense:create", (_e, e) => getDb().prepare("INSERT INTO expenses (category, amount, description, date) VALUES (?, ?, ?, ?)").run(e.category, e.amount, e.description, e.date));
-  electron.ipcMain.handle("report:sales", (_e, s, e) => reportService.getSalesReport(s, e));
-  electron.ipcMain.handle("report:profit", (_e, s, e) => reportService.getProfitReport(s, e));
-  electron.ipcMain.handle("report:pnl", (_e, s, e) => reportService.getProfitAndLoss(s, e));
-  electron.ipcMain.handle("return:getSale", (_e, inv) => returnsService.getSaleForReturn(inv));
-  electron.ipcMain.handle("return:process", (_e, saleId, items, uid, reason) => returnsService.processReturn(saleId, items, uid, reason));
-  electron.ipcMain.handle("return:history", () => returnsService.getHistory());
-  electron.ipcMain.handle("doctor:list", () => doctorService.list());
-  electron.ipcMain.handle("doctor:create", (_e, i) => doctorService.create(i));
-  electron.ipcMain.handle("doctor:update", (_e, id, i) => doctorService.update(id, i));
-  electron.ipcMain.handle("doctor:delete", (_e, id) => doctorService.delete(id));
-  electron.ipcMain.handle("doctor:prescriptions", () => doctorService.getPrescriptions());
-  electron.ipcMain.handle("audit:logs", () => auditService.getLogs());
+  handle("customer:list", () => customerService.list());
+  handle("customer:create", (c) => customerService.create(c));
+  handle("customer:update", (id, c) => customerService.update(id, c));
+  handle("customer:delete", (id) => customerService.delete(id));
+  handle("customer:ledger", (id) => customerService.getLedger(id));
+  handle("customer:pay", (id, amount, notes, date) => customerService.addPayment(id, amount, notes, date));
+  handle("supplier:list", () => supplierService.list());
+  handle("supplier:create", (i) => supplierService.create(i));
+  handle("supplier:delete", (id) => supplierService.delete(id));
+  handle("supplier:ledger", (id) => supplierService.getLedger(id));
+  handle("supplier:pay", (id, amount, notes) => supplierService.addPayment(id, amount, notes));
+  handle("expense:list", () => getDb().prepare("SELECT * FROM expenses ORDER BY id DESC").all());
+  handle("expense:create", (e) => getDb().prepare("INSERT INTO expenses (category, amount, description, date) VALUES (?, ?, ?, ?)").run(e.category, e.amount, e.description, e.date));
+  handle("report:sales", (s, e) => reportService.getSalesReport(s, e));
+  handle("report:profit", (s, e) => reportService.getProfitReport(s, e));
+  handle("report:pnl", (s, e) => reportService.getProfitAndLoss(s, e));
+  handle("return:getSale", (inv) => returnsService.getSaleForReturn(inv));
+  handle("return:process", (saleId, items, uid, reason) => returnsService.processReturn(saleId, items, uid, reason));
+  handle("return:history", () => returnsService.getHistory());
+  handle("doctor:list", () => doctorService.list());
+  handle("doctor:create", (i) => doctorService.create(i));
+  handle("doctor:update", (id, i) => doctorService.update(id, i));
+  handle("doctor:delete", (id) => doctorService.delete(id));
+  handle("doctor:prescriptions", () => doctorService.getPrescriptions());
+  handle("audit:logs", () => auditService.getLogs());
+  electron.ipcMain.handle("network:get", () => configService.get());
+  electron.ipcMain.handle("network:set", (_e, config) => configService.set(config));
+  electron.ipcMain.handle("network:test", async () => {
+    try {
+      if (configService.get().mode === "client") {
+        await callMasterServer("dashboard:stats", []);
+      }
+      return { success: true, message: "Connected to Master PC successfully!" };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  });
+  electron.ipcMain.handle("app:relaunch", () => {
+    electron.app.relaunch();
+    electron.app.exit(0);
+  });
+}
+function startMasterServer() {
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
+  app.post("/rpc", async (req, res) => {
+    const { channel, args } = req.body;
+    try {
+      let result;
+      switch (channel) {
+        case "auth:login":
+          result = authService.login(args[0], args[1]);
+          break;
+        case "auth:reset":
+          result = authService.resetPassword(args[0], args[1], args[2]);
+          break;
+        case "auth:generateCode":
+          result = authService.generateRecoveryCode(args[0]);
+          break;
+        case "medicine:list":
+          result = medicineService.listAll();
+          break;
+        case "medicine:search":
+          result = medicineService.search(args[0]);
+          break;
+        case "medicine:batches":
+          result = medicineService.getBatches(args[0]);
+          break;
+        case "medicine:create":
+          result = medicineService.create(args[0], args[1]);
+          break;
+        case "medicine:update":
+          result = medicineService.update(args[0], args[1], args[2]);
+          break;
+        case "medicine:delete":
+          result = medicineService.delete(args[0], args[1]);
+          break;
+        case "medicine:barcode":
+          result = medicineService.getByBarcode(args[0]);
+          break;
+        case "sales:create":
+          result = salesService.create(args[0], args[1]);
+          break;
+        case "sales:history":
+          result = salesService.getHistory();
+          break;
+        case "sales:details":
+          result = salesService.getSaleDetails(args[0]);
+          break;
+        case "sales:delete":
+          result = salesService.deleteSale(args[0], args[1]);
+          break;
+        case "inventory:addStock":
+          result = inventoryService.addStock(args[0], args[1]);
+          break;
+        case "inventory:purchases":
+          result = inventoryService.getPurchaseHistory();
+          break;
+        case "inventory:updateBatch":
+          result = inventoryService.updateBatch(args[0], args[1]);
+          break;
+        case "inventory:deleteBatch":
+          result = inventoryService.deleteBatch(args[0]);
+          break;
+        case "inventory:adjust":
+          result = inventoryService.adjustStock(args[0], args[1], args[2], args[3], args[4]);
+          break;
+        case "inventory:lowStock":
+          result = inventoryService.getLowStock();
+          break;
+        case "inventory:expiring":
+          result = inventoryService.getExpiring();
+          break;
+        case "inventory:returnHistory":
+          result = inventoryService.getReturnHistory();
+          break;
+        case "user:list":
+          result = userService.list();
+          break;
+        case "user:create":
+          result = userService.create(args[0]);
+          break;
+        case "user:update":
+          result = userService.update(args[0], args[1]);
+          break;
+        case "user:toggle":
+          result = userService.toggleActive(args[0], args[1]);
+          break;
+        case "user:delete":
+          result = userService.delete(args[0]);
+          break;
+        case "customer:list":
+          result = customerService.list();
+          break;
+        case "customer:create":
+          result = customerService.create(args[0]);
+          break;
+        case "customer:update":
+          result = customerService.update(args[0], args[1]);
+          break;
+        case "customer:delete":
+          result = customerService.delete(args[0]);
+          break;
+        case "customer:ledger":
+          result = customerService.getLedger(args[0]);
+          break;
+        case "customer:pay":
+          result = customerService.addPayment(args[0], args[1], args[2], args[3]);
+          break;
+        case "supplier:list":
+          result = supplierService.list();
+          break;
+        case "supplier:create":
+          result = supplierService.create(args[0]);
+          break;
+        case "supplier:delete":
+          result = supplierService.delete(args[0]);
+          break;
+        case "supplier:ledger":
+          result = supplierService.getLedger(args[0]);
+          break;
+        case "supplier:pay":
+          result = supplierService.addPayment(args[0], args[1], args[2]);
+          break;
+        case "expense:list":
+          result = getDb().prepare("SELECT * FROM expenses ORDER BY id DESC").all();
+          break;
+        case "expense:create":
+          result = getDb().prepare("INSERT INTO expenses (category, amount, description, date) VALUES (?, ?, ?, ?)").run(args[0].category, args[0].amount, args[0].description, args[0].date);
+          break;
+        case "report:sales":
+          result = reportService.getSalesReport(args[0], args[1]);
+          break;
+        case "report:profit":
+          result = reportService.getProfitReport(args[0], args[1]);
+          break;
+        case "report:pnl":
+          result = reportService.getProfitAndLoss(args[0], args[1]);
+          break;
+        case "return:getSale":
+          result = returnsService.getSaleForReturn(args[0]);
+          break;
+        case "return:process":
+          result = returnsService.processReturn(args[0], args[1], args[2], args[3]);
+          break;
+        case "return:history":
+          result = returnsService.getHistory();
+          break;
+        case "doctor:list":
+          result = doctorService.list();
+          break;
+        case "doctor:create":
+          result = doctorService.create(args[0]);
+          break;
+        case "doctor:update":
+          result = doctorService.update(args[0], args[1]);
+          break;
+        case "doctor:delete":
+          result = doctorService.delete(args[0]);
+          break;
+        case "doctor:prescriptions":
+          result = doctorService.getPrescriptions();
+          break;
+        case "audit:logs":
+          result = auditService.getLogs();
+          break;
+        case "dashboard:stats":
+          result = dashboardService.stats();
+          break;
+        case "dashboard:alerts":
+          result = dashboardService.getAlerts();
+          break;
+        case "settings:get":
+          result = settingsService.getAll();
+          break;
+        case "settings:update":
+          result = settingsService.update(args[0], args[1]);
+          break;
+        default:
+          throw new Error(`Channel ${channel} not implemented on Master Server`);
+      }
+      res.json({ success: true, data: result });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+  app.listen(3001, "0.0.0.0", () => {
+    console.log("Master Server running on port 3001");
+  });
 }
 log.initialize();
+electron.app.setAppUserModelId("pk.vitapos.app");
 electron.app.whenReady().then(() => {
-  electronApp.setAppUserModelId("pk.nationalmedicalstore.app");
+  electronApp.setAppUserModelId("pk.vitapos.app");
   initDatabase();
   runMigrations();
   runSeed();
+  const config = configService.get();
+  if (config.mode === "master") {
+    startMasterServer();
+  }
   registerIpc();
   createWindow();
   electron.app.on("browser-window-created", (_, w) => optimizer.watchWindowShortcuts(w));
+  const TWELVE_HOURS = 12 * 60 * 60 * 1e3;
+  setInterval(() => {
+    console.log("[system] Running scheduled 12-hour backup...");
+    runAutoBackup();
+  }, TWELVE_HOURS);
 });
 electron.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") electron.app.quit();
-});
-electron.app.on("before-quit", () => {
-  runAutoBackup();
 });

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { 
-  LayoutDashboard, ShoppingCart, Pill, LogOut, Users, BarChart3, Truck, Settings, DollarSign, RotateCcw, Bell, Stethoscope, FileText, ShieldAlert, Calculator, Activity, AlertTriangle
+  LayoutDashboard, ShoppingCart, Pill, LogOut, Users, BarChart3, Truck, Settings, DollarSign, RotateCcw, Bell, Stethoscope, FileText, ShieldAlert, Calculator, Activity, AlertTriangle, CheckCircle
 } from 'lucide-react'
 import { useAuth } from '../../store/auth.store'
 import { useUI } from '../../store/ui.store'
@@ -58,6 +58,7 @@ export default function AppLayout() {
 
   const [showNotifications, setShowNotifications] = useState(false)
   const [alerts, setAlerts] = useState<{ lowStockItems: any[], expiringItems: any[] }>({ lowStockItems: [], expiringItems: [] })
+  const [dismissedCount, setDismissedCount] = useState(0)
 
   useEffect(() => {
     if (theme === 'dark') document.documentElement.classList.add('dark')
@@ -68,30 +69,55 @@ export default function AppLayout() {
   useEffect(() => {
     const loadAlerts = () => {
       if (window.api?.dashboard?.alerts) {
-        ipc.dashboard.alerts().then(res => { if (res) setAlerts(res) }).catch(console.error)
+        ipc.dashboard.alerts().then(res => { 
+          if (res) {
+            setAlerts(res) 
+            const total = (res.lowStockItems?.length || 0) + (res.expiringItems?.length || 0)
+            
+            // Native Windows Notification (Only runs when logged in)
+            if (total > 0 && Notification.permission === 'granted') {
+              new Notification('VitaPOS Alert', {
+                body: `You have ${res.lowStockItems.length} low stock items and ${res.expiringItems.length} expiring items.`,
+                icon: 'resources/icon.png'
+              })
+            }
+          } 
+        }).catch(console.error)
       }
     }
+    
+    // Request notification permission
+    if (Notification.permission !== 'granted') {
+      Notification.requestPermission()
+    }
+
     loadAlerts()
     const interval = setInterval(loadAlerts, 5 * 60 * 1000)
     return () => clearInterval(interval)
   }, [])
 
   const totalAlerts = (alerts.lowStockItems?.length || 0) + (alerts.expiringItems?.length || 0)
-  
+  const hasUnread = totalAlerts > dismissedCount
+
   const navGroups = ALL_GROUPS.map(group => ({
     ...group,
     items: group.items.filter(item => item.roles.includes(user?.role || 'cashier'))
   })).filter(group => group.items.length > 0)
 
-  const handleNotificationClick = () => {
-    nav('/inventory')
+  const handleNotificationClick = (name: string) => {
+    nav(`/medicines?search=${encodeURIComponent(name)}`)
+    setShowNotifications(false)
+  }
+
+  const clearNotifications = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setDismissedCount(totalAlerts)
     setShowNotifications(false)
   }
 
   return (
     <div className="flex h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-sans transition-colors overflow-hidden">
       
-      {/* Sidebar (z-30) */}
       <aside className="w-64 bg-white dark:bg-slate-950 flex flex-col shadow-xl z-30 border-r border-slate-200 dark:border-slate-800 relative">
         <div className="px-6 py-8 border-b border-slate-200 dark:border-slate-800 flex flex-col items-center">
           <div className="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 rounded-xl flex items-center justify-center mb-3">
@@ -128,15 +154,17 @@ export default function AppLayout() {
               <p className="text-xs text-slate-500 truncate">@{user?.username}</p>
             </div>
           </div>
-          <button onClick={() => { clear(); nav('/') }} className="w-full flex items-center justify-center gap-2 py-2 text-sm font-bold text-red-500 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 rounded-lg transition-colors">
+          
+          <button 
+            onClick={clear} 
+            className="w-full flex items-center justify-center gap-2 py-2 text-sm font-bold text-red-500 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 rounded-lg transition-colors"
+          >
             <LogOut size={16} /> Sign Out
           </button>
         </div>
       </aside>
       
       <div className="flex-1 flex flex-col overflow-hidden relative">
-        
-        {/* Header (z-50) */}
         <header className="h-16 bg-white dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-8 z-50 relative">
           <div className="text-sm text-slate-500 dark:text-slate-400 font-medium">
             {new Date().toLocaleDateString('en-PK', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
@@ -145,7 +173,7 @@ export default function AppLayout() {
           <div className="relative z-50">
             <button onClick={() => setShowNotifications(!showNotifications)} className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 relative transition">
               <Bell size={20} className="text-slate-600 dark:text-slate-300" />
-              {totalAlerts > 0 && (
+              {hasUnread && totalAlerts > 0 && (
                 <span className="absolute top-1 right-1 w-4 h-4 bg-red-500 rounded-full border-2 border-white dark:border-slate-950 flex items-center justify-center text-[10px] font-bold text-white">
                   {totalAlerts > 9 ? '9+' : totalAlerts}
                 </span>
@@ -154,14 +182,19 @@ export default function AppLayout() {
 
             {showNotifications && (
               <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden z-[100]">
-                <div className="p-4 border-b border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50">
+                <div className="p-4 border-b border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 flex justify-between items-center">
                   <h3 className="font-bold text-sm">Notifications</h3>
+                  {totalAlerts > 0 && (
+                    <button onClick={clearNotifications} className="text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1">
+                      <CheckCircle size={12} /> Mark as Read
+                    </button>
+                  )}
                 </div>
-                <div className="max-h-96 overflow-y-auto">
+                <div className="max-h-[300px] overflow-y-auto">
                   {totalAlerts === 0 && <p className="p-4 text-sm text-center text-slate-400">You're all caught up!</p>}
                   
                   {alerts.lowStockItems?.map((item, i) => (
-                    <div key={`ls-${i}`} onClick={handleNotificationClick} className="p-3 border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 flex gap-3 cursor-pointer transition-colors">
+                    <div key={`ls-${i}`} onClick={() => handleNotificationClick(item.name)} className="p-3 border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 flex gap-3 cursor-pointer transition-colors">
                       <div className="text-amber-500 mt-0.5"><Pill size={16}/></div>
                       <div>
                         <p className="text-sm font-bold">{item.name}</p>
@@ -171,7 +204,7 @@ export default function AppLayout() {
                   ))}
 
                   {alerts.expiringItems?.map((item, i) => (
-                    <div key={`ex-${i}`} onClick={handleNotificationClick} className="p-3 border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 flex gap-3 cursor-pointer transition-colors">
+                    <div key={`ex-${i}`} onClick={() => handleNotificationClick(item.medicine_name)} className="p-3 border-b border-slate-50 dark:border-slate-700/50 hover:bg-slate-50 dark:hover:bg-slate-700/50 flex gap-3 cursor-pointer transition-colors">
                       <div className="text-red-500 mt-0.5"><RotateCcw size={16}/></div>
                       <div>
                         <p className="text-sm font-bold">{item.medicine_name}</p>
@@ -185,7 +218,6 @@ export default function AppLayout() {
           </div>
         </header>
 
-        {/* Main Content (z-10) */}
         <main className="flex-1 overflow-y-auto z-10 relative">
           <div className="p-8 max-w-[1600px] mx-auto h-full">
             <Outlet />

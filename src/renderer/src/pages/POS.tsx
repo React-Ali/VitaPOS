@@ -4,7 +4,7 @@ import { useCart } from '../store/cart.store'
 import { useAuth } from '../store/auth.store'
 import { 
   Trash2, Printer, Search, User, Plus, Minus, Stethoscope, Percent, 
-  UserPlus, X, AlertCircle, Calculator, HeartPulse, ShieldAlert 
+  UserPlus, X, AlertCircle, Calculator, ScanBarcode, WifiOff
 } from 'lucide-react'
 
 export default function POS() {
@@ -32,39 +32,73 @@ export default function POS() {
   
   const [controlled, setControlled] = useState<{ cnic: string; doctorId: number | '' } | null>(null)
   
-  // Admin Actions
-  const isAdmin = user?.role === 'admin'
-  const [showHealModal, setShowHealModal] = useState(false)
-  const [healStatus, setHealStatus] = useState<string[]>([])
-  const [healing, setHealing] = useState(false)
-  const [confirmDeleteSale, setConfirmDeleteSale] = useState(false)
-
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const barcodeBuffer = useRef<string>('')
+  const barcodeTimeout = useRef<any>(null)
 
   const loadData = () => {
-    if (window.api?.medicine?.list) ipc.medicine.list().then(setAllMeds).catch(console.error)
+    if (window.api?.medicine?.list) {
+      ipc.medicine.list()
+        .then(setAllMeds)
+        .catch(err => setError(err.message || 'Failed to connect to Master PC'))
+    }
     if (window.api?.customer?.list) ipc.customer.list().then(setCustomers).catch(console.error)
     if (window.api?.doctor?.list) ipc.doctor.list().then(setDoctors).catch(console.error)
   }
 
   useEffect(() => { loadData() }, [])
 
+  // GLOBAL BARCODE SCANNER LISTENER
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'F2') { e.preventDefault(); searchInputRef.current?.focus() }
-      if (e.key === 'F4') { e.preventDefault(); if (cart.lines.length > 0) checkout() }
-      if (e.key === 'Escape') { 
-        setBatchPicker(null); setControlled(null); setShowQuickAddCustomer(false); setLastInvoice(null); setShowHealModal(false) 
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) {
+        return
+      }
+
+      if (e.key === 'Enter') {
+        const scannedCode = barcodeBuffer.current.trim()
+        barcodeBuffer.current = '' 
+        
+        if (scannedCode.length > 2) {
+          e.preventDefault()
+          handleBarcodeScan(scannedCode)
+        }
+      } else if (e.key.length === 1) { 
+        barcodeBuffer.current += e.key
+        
+        if (barcodeTimeout.current) clearTimeout(barcodeTimeout.current)
+        barcodeTimeout.current = setTimeout(() => { barcodeBuffer.current = '' }, 100)
       }
     }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [cart.lines, paymentMethod, discount, controlled])
+
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [])
+
+  const handleBarcodeScan = async (code: string) => {
+    try {
+      const med = await ipc.medicine.getByBarcode(code)
+      if (med) {
+        await pickMedicine(med)
+        setQuery('')
+        setResults([])
+      } else {
+        setQuery(code)
+        search(code)
+      }
+    } catch (err: any) {
+      setError(err.message || 'Network Error: Unable to reach Master PC')
+    }
+  }
 
   const search = async (q: string) => {
     setQuery(q)
     if (!q.trim()) return setResults([])
-    try { setResults(await ipc.medicine.search(q)) } catch (err) { console.error(err) }
+    try { 
+      setResults(await ipc.medicine.search(q)) 
+    } catch (err: any) { 
+      setError(err.message || 'Network Error: Unable to search')
+    }
   }
 
   const handleKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -76,13 +110,15 @@ export default function POS() {
   }
 
   const pickMedicine = async (m: any) => {
-    if (m.total_qty <= 0) return setError('Out of stock!')
+    if (m.total_qty <= 0) return setError(`Out of stock! (${m.name})`)
     try {
       const batches = await ipc.medicine.batches(m.id)
       if (!batches || !batches.length) return setError('No batches found for this product.')
       setError('')
       setBatchPicker({ medicine: m, batches })
-    } catch (err) { console.error(err) }
+    } catch (err: any) { 
+      setError(err.message || 'Network Error: Unable to load batches')
+    }
   }
 
   const addToCart = (batch: any) => {
@@ -137,32 +173,9 @@ export default function POS() {
       
       setLastInvoice({ ...res, items: [...cart.lines], customerName: customers.find(c => c.id === cart.customerId)?.name, cashReceived, change: cashReceived - Math.max(0, cart.total() - discount) })
       cart.clear(); setControlled(null); setError(''); setDiscount(0); setCashReceived(0); loadData()
-    } catch (err: any) { setError(err.message); setControlled(null) }
-  }
-
-  const voidSale = async () => {
-    if (!lastInvoice) return
-    try {
-      await ipc.sales.delete(lastInvoice.id, user!.id)
-      setLastInvoice(null)
-      setConfirmDeleteSale(false)
-      loadData()
-    } catch (err: any) {
-      alert(err.message)
-    }
-  }
-
-  const runSelfHeal = async () => {
-    setHealing(true)
-    setHealStatus([])
-    try {
-      const results = await ipc.system.heal()
-      setHealStatus(results)
-    } catch (err: any) {
-      setHealStatus([`Error: ${err.message}`])
-    } finally {
-      setHealing(false)
-      loadData()
+    } catch (err: any) { 
+      setError(err.message || 'Network Error: Failed to complete sale')
+      setControlled(null) 
     }
   }
 
@@ -171,11 +184,13 @@ export default function POS() {
     try {
       const settings = await ipc.settings.get()
       
+      // NEW: Add "Price" column and format perfectly for 80mm
       const itemsHtml = lastInvoice.items.map((l: any) => `
         <tr>
-          <td style="text-align:left; width: 50%; word-break: break-word;">${l.medicineName}</td>
+          <td style="text-align:left; width: 40%; word-break: break-word;">${l.medicineName}</td>
           <td style="text-align:center; width: 15%;">${l.qty}</td>
-          <td style="text-align:right; width: 35%;">${(l.qty * l.unitPrice).toFixed(2)}</td>
+          <td style="text-align:right; width: 20%;">${l.unitPrice.toFixed(2)}</td>
+          <td style="text-align:right; width: 25%;">${(l.qty * l.unitPrice).toFixed(2)}</td>
         </tr>
       `).join('')
 
@@ -184,18 +199,18 @@ export default function POS() {
           <head>
             <style>
               @page { size: 80mm 297mm; margin: 0; }
-              body { font-family: 'Courier New', Courier, monospace; width: 80mm; margin: 0; padding: 2mm; color: #000; font-size: 12px; box-sizing: border-box; }
-              h2 { margin: 0 0 2px 0; font-size: 16px; text-transform: uppercase; text-align: center; font-weight: bold; }
-              .meta { text-align: center; margin: 2px 0; font-size: 11px; }
-              .divider { border-top: 1px dashed #000; margin: 6px 0; }
-              .info { display: flex; justify-content: space-between; font-size: 11px; margin: 2px 0; }
-              table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 11px; table-layout: fixed; }
-              th { border-bottom: 1px dashed #000; padding-bottom: 2px; text-align: left; }
-              td { padding: 2px 0; }
-              .totals { margin-top: 6px; font-size: 12px; }
-              .totals-row { display: flex; justify-content: space-between; margin: 2px 0; }
-              .grand-total { font-size: 14px; font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 4px 0; margin: 4px 0; }
-              .footer { text-align: center; font-size: 10px; margin-top: 10px; }
+              body { font-family: 'Courier New', Courier, monospace; width: 80mm; margin: 0; padding: 5mm; color: #000; font-size: 12px; box-sizing: border-box; }
+              h2 { margin: 0 0 4px 0; font-size: 18px; text-transform: uppercase; text-align: center; font-weight: bold; }
+              .meta { text-align: center; margin: 3px 0; font-size: 11px; }
+              .divider { border-top: 1px dashed #000; margin: 8px 0; }
+              .info { display: flex; justify-content: space-between; font-size: 11px; margin: 4px 0; }
+              table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 11px; table-layout: fixed; }
+              th { border-bottom: 1px dashed #000; border-top: 1px dashed #000; padding: 4px 0; text-align: left; font-weight: bold; }
+              td { padding: 4px 0; }
+              .totals { margin-top: 8px; font-size: 12px; }
+              .totals-row { display: flex; justify-content: space-between; margin: 4px 0; }
+              .grand-total { font-size: 16px; font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 8px 0; margin: 8px 0; }
+              .footer { text-align: center; font-size: 10px; margin-top: 15px; }
             </style>
           </head>
           <body>
@@ -217,19 +232,35 @@ export default function POS() {
             <div class="divider"></div>
             
             <table>
-              <thead><tr><th style="width: 50%;">Item</th><th style="width: 15%; text-align:center;">Qty</th><th style="width: 35%; text-align:right;">Total</th></tr></thead>
-              <tbody>${itemsHtml}</tbody>
+              <thead>
+                <tr>
+                  <th style="width: 40%;">Item</th>
+                  <th style="width: 15%; text-align:center;">Qty</th>
+                  <th style="width: 20%; text-align:right;">Price</th>
+                  <th style="width: 25%; text-align:right;">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${itemsHtml}
+              </tbody>
             </table>
             
-            <div class="divider"></div>
-            
             <div class="totals">
-              <div class="totals-row"><span>Subtotal:</span><span>${lastInvoice.total.toFixed(2)}</span></div>
+              <div class="totals-row">
+                <span>Subtotal:</span>
+                <span>${lastInvoice.total.toFixed(2)}</span>
+              </div>
               ${discount > 0 ? `<div class="totals-row"><span>Discount:</span><span>-${discount.toFixed(2)}</span></div>` : ''}
-              <div class="totals-row grand-total"><span>TOTAL:</span><span>Rs. ${lastInvoice.total.toFixed(2)}</span></div>
+              <div class="totals-row grand-total">
+                <span>TOTAL:</span>
+                <span>Rs. ${lastInvoice.total.toFixed(2)}</span>
+              </div>
             </div>
             
-            <div class="footer"><p style="margin:2px 0;">${settings.receipt_footer || 'Thank you!'}</p></div>
+            <div class="footer">
+              <p style="margin:3px 0;">${settings.receipt_footer || 'Thank you for your business!'}</p>
+              <p style="margin:3px 0;">Powered by VitaPOS</p>
+            </div>
           </body>
         </html>
       `
@@ -245,7 +276,6 @@ export default function POS() {
   return (
     <div className="flex h-[calc(100vh-6rem)] gap-6">
       
-      {/* QUICK ADD MODAL */}
       {showQuickAddCustomer && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-[60]">
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 w-[400px] shadow-2xl">
@@ -260,36 +290,8 @@ export default function POS() {
         </div>
       )}
 
-      {/* SELF HEAL MODAL (Admin Only) */}
-      {showHealModal && isAdmin && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[70]">
-          <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 w-[500px] shadow-2xl">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-xl text-emerald-600 flex items-center gap-2"><HeartPulse /> System Self-Heal</h3>
-              <button onClick={() => setShowHealModal(false)}><X size={20}/></button>
-            </div>
-            <p className="text-sm text-slate-500 mb-4">This will fix negative stock, remove orphaned records, and optimize the database. It is safe to run anytime.</p>
-            
-            {healStatus.length > 0 && (
-              <div className="bg-slate-50 dark:bg-slate-900 p-4 rounded-lg mb-4 max-h-40 overflow-y-auto">
-                {healStatus.map((msg, i) => (
-                  <p key={i} className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span> {msg}
-                  </p>
-                ))}
-              </div>
-            )}
-
-            <button onClick={runSelfHeal} disabled={healing} className="w-full bg-emerald-600 text-white py-3 rounded-lg font-bold hover:bg-emerald-700 transition">
-              {healing ? 'Healing Database...' : 'Run Diagnostics & Heal'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* LEFT PANEL (SEARCH) */}
       <div className="flex-1 flex flex-col">
-        <div className="flex justify-between items-end mb-3">
+        <div className="flex justify-between items-end mb-3 flex-wrap gap-2">
           <div className="flex bg-slate-200/50 dark:bg-slate-800/50 p-1 rounded-xl w-fit">
             {['All', 'Human', 'Vet', 'Bakery'].map((t: any) => (
               <button key={t} onClick={() => setFilterType(t)} className={`px-4 py-1.5 rounded-lg font-bold text-xs transition ${filterType === t ? 'bg-white dark:bg-slate-700 text-emerald-600 shadow-sm' : 'text-slate-500'}`}>
@@ -297,18 +299,32 @@ export default function POS() {
               </button>
             ))}
           </div>
-          {isAdmin && (
-            <button onClick={() => setShowHealModal(true)} className="text-xs font-bold text-slate-500 hover:text-emerald-600 flex items-center gap-1 bg-white dark:bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm transition">
-              <HeartPulse size={14} /> Self-Heal
-            </button>
-          )}
+          
+          <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30 px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800">
+            <ScanBarcode size={16} className="animate-pulse" /> Scanner Ready
+          </div>
         </div>
 
         <div className="relative mb-4">
           <Search className="absolute left-4 top-3.5 text-slate-400" size={20} />
-          <input ref={searchInputRef} value={query} onChange={(e) => search(e.target.value)} onKeyDown={handleKeyDown} placeholder="Scan barcode or search... (F2)" className="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-200 shadow-sm focus:ring-2 focus:ring-emerald-500 outline-none text-lg bg-white dark:bg-slate-800 font-medium" autoFocus />
+          <input 
+            ref={searchInputRef} 
+            value={query} 
+            onChange={(e) => search(e.target.value)} 
+            onKeyDown={handleKeyDown} 
+            placeholder="Scan barcode OR type product name manually..." 
+            className="w-full pl-12 pr-4 py-3 rounded-xl border-2 border-emerald-100 dark:border-slate-700 shadow-sm focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none text-lg bg-white dark:bg-slate-800 font-medium transition-all" 
+            autoFocus 
+          />
         </div>
         
+        {error && (
+          <div className="bg-red-50 text-red-600 p-3 rounded-xl mb-3 flex items-center gap-2 font-bold text-sm">
+            <WifiOff size={16}/> {error}
+            <button onClick={() => { setError(''); loadData(); }} className="ml-auto underline text-xs">Retry</button>
+          </div>
+        )}
+
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 flex-1 overflow-y-auto">
           {displayMeds.length === 0 && <p className="text-center text-slate-400 mt-10">No products found.</p>}
           {displayMeds.map((m) => (
@@ -326,7 +342,6 @@ export default function POS() {
         </div>
       </div>
 
-      {/* RIGHT PANEL (CART) */}
       <div className="w-[420px] bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 flex flex-col">
         <div className="p-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 rounded-t-2xl flex gap-2">
           <div className="relative flex-1">
@@ -359,8 +374,6 @@ export default function POS() {
         </div>
 
         <div className="p-4 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 rounded-b-2xl">
-          {error && <p className="text-red-500 text-xs mb-2 font-medium bg-red-50 p-2 rounded flex items-center gap-2"><AlertCircle size={14}/> {error}</p>}
-          
           <div className="space-y-3 mb-4">
             <div className="flex justify-between items-center text-sm font-medium"><span className="text-slate-500">Subtotal</span><span>{fmtPKR(cart.total())}</span></div>
             <div className="flex justify-between items-center text-sm font-medium">
@@ -399,7 +412,6 @@ export default function POS() {
         </div>
       </div>
 
-      {/* BATCH MODAL */}
       {batchPicker && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 w-96 shadow-2xl">
@@ -420,7 +432,6 @@ export default function POS() {
         </div>
       )}
 
-      {/* CONTROLLED DRUG MODAL */}
       {controlled && (
         <div className="fixed inset-0 bg-red-900/60 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 w-[450px] shadow-2xl border-t-8 border-red-600">
@@ -440,7 +451,6 @@ export default function POS() {
         </div>
       )}
 
-      {/* RECEIPT / SUCCESS MODAL */}
       {lastInvoice && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-8 w-96 text-center shadow-2xl">
@@ -454,28 +464,10 @@ export default function POS() {
               </p>
             )}
             
-            <button onClick={printReceipt} className="w-full flex items-center justify-center gap-2 bg-slate-800 dark:bg-slate-700 text-white py-3 rounded-xl font-medium hover:bg-slate-900 transition mb-2 shadow-md">
+            <button onClick={printReceipt} className="w-full flex items-center justify-center gap-2 bg-slate-800 dark:bg-slate-700 text-white py-3 rounded-xl font-medium hover:bg-slate-900 transition mb-3 shadow-md">
               <Printer size={18} /> Print Receipt
             </button>
-            
-            {/* ADMIN ONLY: DELETE SALE */}
-            {isAdmin && !confirmDeleteSale && (
-              <button onClick={() => setConfirmDeleteSale(true)} className="w-full flex items-center justify-center gap-2 text-red-500 text-sm font-bold py-2 hover:bg-red-50 rounded-lg transition mb-2">
-                <Trash2 size={16} /> Void Sale (Admin)
-              </button>
-            )}
-
-            {confirmDeleteSale && (
-              <div className="bg-red-50 border border-red-200 p-3 rounded-lg mb-2">
-                <p className="text-xs text-red-600 font-bold mb-2 flex items-center justify-center gap-1"><ShieldAlert size={14}/> Permanently delete this sale?</p>
-                <div className="flex gap-2">
-                  <button onClick={() => setConfirmDeleteSale(false)} className="flex-1 text-xs font-bold bg-white py-1 rounded">Cancel</button>
-                  <button onClick={voidSale} className="flex-1 text-xs font-bold bg-red-600 text-white py-1 rounded">Delete</button>
-                </div>
-              </div>
-            )}
-
-            <button onClick={() => { setLastInvoice(null); setConfirmDeleteSale(false); }} className="w-full py-3 rounded-xl bg-slate-200 text-slate-700 font-medium hover:bg-slate-300 mt-2">Close</button>
+            <button onClick={() => setLastInvoice(null)} className="w-full py-3 rounded-xl bg-slate-200 text-slate-700 font-medium hover:bg-slate-300 mt-2">Close</button>
           </div>
         </div>
       )}

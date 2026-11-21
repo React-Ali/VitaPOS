@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
 
 interface User {
   id: number
@@ -11,18 +10,18 @@ interface User {
 interface AuthState {
   user: User | null
   token: string | null
+  lastActivity: number
   setSession: (user: User, token: string) => void
+  updateActivity: () => void
   clear: () => void
 }
 
-export const useAuth = create<AuthState>()(
-  persist(
-    (set) => ({
-      user: null,
-      token: null,
-      setSession: (user, token) => set({ user, token }),
-      clear: () => set({ user: null, token: null })
-    }),
-    { name: 'nms-auth' }
-  )
-)
+// Removed 'persist' middleware. This forces a fresh login every time the app opens.
+export const useAuth = create<AuthState>()((set) => ({
+  user: null,
+  token: null,
+  lastActivity: Date.now(),
+  setSession: (user, token) => set({ user, token, lastActivity: Date.now() }),
+  updateActivity: () => set({ lastActivity: Date.now() }),
+  clear: () => set({ user: null, token: null })
+}))

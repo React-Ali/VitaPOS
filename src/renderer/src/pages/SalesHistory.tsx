@@ -43,11 +43,13 @@ export default function SalesHistory() {
       const data = await ipc.sales.details(saleId)
       const settings = await ipc.settings.get()
 
+      // NEW: 4 Columns (Item, Qty, Price, Total) just like the POS
       const itemsHtml = data.items.map((l: any) => `
         <tr>
-          <td style="text-align:left; padding: 2px 0;">${l.medicine_name}</td>
-          <td style="text-align:center; padding: 2px 0;">${l.qty}</td>
-          <td style="text-align:right; padding: 2px 0;">${(l.qty * l.unit_price).toFixed(2)}</td>
+          <td style="text-align:left; width: 40%; word-break: break-word;">${l.medicine_name}</td>
+          <td style="text-align:center; width: 15%;">${l.qty}</td>
+          <td style="text-align:right; width: 20%;">${l.unit_price.toFixed(2)}</td>
+          <td style="text-align:right; width: 25%;">${l.line_total.toFixed(2)}</td>
         </tr>
       `).join('')
 
@@ -55,55 +57,80 @@ export default function SalesHistory() {
         <html>
           <head>
             <style>
-              @page { size: 80mm auto; margin: 0; }
-              body { font-family: 'Courier New', Courier, monospace; width: 80mm; margin: 0; padding: 4mm; color: #000; font-size: 12px; box-sizing: border-box; }
-              h2 { margin: 0 0 2px 0; font-size: 16px; text-transform: uppercase; text-align: center; font-weight: bold; }
-              .meta { text-align: center; margin: 2px 0; font-size: 11px; }
-              .divider { border-top: 1px dashed #000; margin: 6px 0; }
-              .info { display: flex; justify-content: space-between; font-size: 11px; margin: 2px 0; }
-              table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 11px; table-layout: fixed; }
-              th { border-bottom: 1px dashed #000; padding-bottom: 2px; text-align: left; }
-              td { padding: 2px 0; }
-              .totals { margin-top: 6px; font-size: 12px; }
-              .totals-row { display: flex; justify-content: space-between; margin: 2px 0; }
-              .grand-total { font-size: 14px; font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 4px 0; margin: 4px 0; }
-              .footer { text-align: center; font-size: 10px; margin-top: 10px; }
+              @page { size: 80mm 297mm; margin: 0; }
+              body { font-family: 'Courier New', Courier, monospace; width: 80mm; margin: 0; padding: 5mm; color: #000; font-size: 12px; box-sizing: border-box; }
+              h2 { margin: 0 0 4px 0; font-size: 18px; text-transform: uppercase; text-align: center; font-weight: bold; }
+              .meta { text-align: center; margin: 3px 0; font-size: 11px; }
+              .divider { border-top: 1px dashed #000; margin: 8px 0; }
+              .info { display: flex; justify-content: space-between; font-size: 11px; margin: 4px 0; }
+              table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 11px; table-layout: fixed; }
+              th { border-bottom: 1px dashed #000; border-top: 1px dashed #000; padding: 4px 0; text-align: left; font-weight: bold; }
+              td { padding: 4px 0; }
+              .totals { margin-top: 8px; font-size: 12px; }
+              .totals-row { display: flex; justify-content: space-between; margin: 4px 0; }
+              .grand-total { font-size: 16px; font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 8px 0; margin: 8px 0; }
+              .footer { text-align: center; font-size: 10px; margin-top: 15px; }
             </style>
           </head>
           <body>
             <h2>${settings.shop_name || 'VitaPOS'}</h2>
             <div class="meta">${settings.shop_address || ''}</div>
             <div class="meta">Ph: ${settings.shop_phone || ''}</div>
+            
             <div class="divider"></div>
+            
             <div class="info">
-              <span>Inv: <b>${data.sale.invoice_no}</b></span>
-              <span>Date: ${formatDateTime(data.sale.created_at).split(',')[0]}</span>
+              <span style="width: 60%;">Inv: <b>${data.sale.invoice_no}</b></span>
+              <span style="width: 40%; text-align: right;">Date: ${formatDateTime(data.sale.created_at).split(',')[0]}</span>
             </div>
             <div class="info">
-              <span>Cust: ${data.sale.customer_name || 'Walk-in'}</span>
-              <span>Pay: ${data.sale.payment_method}</span>
+              <span style="width: 60%;">Cust: ${data.sale.customer_name || 'Walk-in'}</span>
+              <span style="width: 40%; text-align: right;">Pay: ${data.sale.payment_method}</span>
             </div>
+            
             <div class="divider"></div>
+            
             <table>
-              <thead><tr><th style="width: 50%;">Item</th><th style="width: 15%; text-align:center;">Qty</th><th style="width: 35%; text-align:right;">Total</th></tr></thead>
-              <tbody>${itemsHtml}</tbody>
+              <thead>
+                <tr>
+                  <th style="width: 40%;">Item</th>
+                  <th style="width: 15%; text-align:center;">Qty</th>
+                  <th style="width: 20%; text-align:right;">Price</th>
+                  <th style="width: 25%; text-align:right;">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${itemsHtml}
+              </tbody>
             </table>
-            <div class="divider"></div>
+            
             <div class="totals">
-              <div class="totals-row"><span>Subtotal:</span><span>${data.sale.subtotal.toFixed(2)}</span></div>
-              <div class="totals-row"><span>Discount:</span><span>${data.sale.discount.toFixed(2)}</span></div>
-              <div class="totals-row grand-total"><span>TOTAL:</span><span>Rs. ${data.sale.total.toFixed(2)}</span></div>
+              <div class="totals-row">
+                <span>Subtotal:</span>
+                <span>${data.sale.subtotal.toFixed(2)}</span>
+              </div>
+              ${data.sale.discount > 0 ? `<div class="totals-row"><span>Discount:</span><span>-${data.sale.discount.toFixed(2)}</span></div>` : ''}
+              <div class="totals-row grand-total">
+                <span>TOTAL:</span>
+                <span>Rs. ${data.sale.total.toFixed(2)}</span>
+              </div>
             </div>
-            <div class="footer"><p>${settings.receipt_footer || 'Thank you!'}</p></div>
+            
+            <div class="footer">
+              <p style="margin:3px 0;">${settings.receipt_footer || 'Thank you for your business!'}</p>
+              <p style="margin:3px 0;">Powered by VitaPOS</p>
+            </div>
           </body>
         </html>
       `
       ipc.print.receipt(html)
-    } catch (err) { alert('Failed to load invoice details') }
+    } catch (err) { 
+      alert('Failed to load invoice details') 
+    }
   }
 
   return (
-    <div className="max-w-6xl">
+    <div className="max-w-6xl mx-auto">
       <div className="mb-6 flex justify-between items-end">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 dark:text-white">Sales History (Invoices)</h1>
@@ -141,7 +168,7 @@ export default function SalesHistory() {
                     <Printer size={16} />
                   </button>
                   {isAdmin && (
-                    <button onClick={() => { setConfirmDelete(s); setDeleteError('') }} className="bg-red-50 text-red-600 p-2 rounded-lg hover:bg-red-100 transition" title="Void/Delete Sale">
+                    <button onClick={() => { setConfirmDelete(s); setDeleteError(''); }} className="bg-red-50 text-red-600 p-2 rounded-lg hover:bg-red-100 transition" title="Void/Delete Sale">
                       <Trash2 size={16} />
                     </button>
                   )}
@@ -165,7 +192,9 @@ export default function SalesHistory() {
               <p className="text-sm text-slate-500 mb-6">Are you sure you want to delete invoice <b>{confirmDelete.invoice_no}</b>? The stock will be restored to inventory.</p>
             )}
             <div className="flex gap-3">
-              <button onClick={() => setConfirmDelete(null)} className="flex-1 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 font-bold hover:bg-slate-300">Cancel</button>
+              <button onClick={() => setConfirmDelete(null)} className="flex-1 py-2 rounded-lg bg-slate-200 dark:bg-slate-700 font-bold hover:bg-slate-300">
+                {deleteError ? 'Close' : 'Cancel'}
+              </button>
               {!deleteError && <button onClick={executeDelete} className="flex-1 py-2 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 shadow-md">Delete Sale</button>}
             </div>
           </div>

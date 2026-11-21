@@ -1,14 +1,19 @@
 "use strict";
 const electron = require("electron");
 const api = {
-  auth: { login: (u, p) => electron.ipcRenderer.invoke("auth:login", u, p) },
+  auth: {
+    login: (u, p) => electron.ipcRenderer.invoke("auth:login", u, p),
+    reset: (u, p, key) => electron.ipcRenderer.invoke("auth:reset", u, p, key),
+    generateCode: (username) => electron.ipcRenderer.invoke("auth:generateCode", username)
+  },
   medicine: {
     search: (q) => electron.ipcRenderer.invoke("medicine:search", q),
     list: () => electron.ipcRenderer.invoke("medicine:list"),
     create: (i, uid) => electron.ipcRenderer.invoke("medicine:create", i, uid),
     update: (id, i, uid) => electron.ipcRenderer.invoke("medicine:update", id, i, uid),
     delete: (id, uid) => electron.ipcRenderer.invoke("medicine:delete", id, uid),
-    batches: (id) => electron.ipcRenderer.invoke("medicine:batches", id)
+    batches: (id) => electron.ipcRenderer.invoke("medicine:batches", id),
+    getByBarcode: (code) => electron.ipcRenderer.invoke("medicine:barcode", code)
   },
   sales: {
     create: (i, uid) => electron.ipcRenderer.invoke("sales:create", i, uid),
@@ -87,6 +92,14 @@ const api = {
   },
   audit: {
     logs: () => electron.ipcRenderer.invoke("audit:logs")
+  },
+  network: {
+    get: () => electron.ipcRenderer.invoke("network:get"),
+    set: (config) => electron.ipcRenderer.invoke("network:set", config),
+    test: () => electron.ipcRenderer.invoke("network:test")
+  },
+  app: {
+    relaunch: () => electron.ipcRenderer.invoke("app:relaunch")
   }
 };
 electron.contextBridge.exposeInMainWorld("api", api);

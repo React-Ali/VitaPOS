@@ -1,28 +1,27 @@
 import { useEffect, useState } from 'react'
 import { ipc } from '../lib/ipc'
 import { AlertTriangle, Clock } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 
 export default function Inventory() {
   const [lowStock, setLowStock] = useState<any[]>([])
   const [expiring, setExpiring] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const nav = useNavigate()
 
   useEffect(() => {
     const loadData = async () => {
       try {
         setLoading(true)
         if (window.api?.inventory?.lowStock) {
-          const lowData = await ipc.inventory.lowStock()
-          setLowStock(lowData || [])
+          setLowStock(await ipc.inventory.lowStock() || [])
         }
         if (window.api?.inventory?.expiring) {
-          const expData = await ipc.inventory.expiring()
-          setExpiring(expData || [])
+          setExpiring(await ipc.inventory.expiring() || [])
         }
         setError('')
       } catch (err: any) {
-        console.error("Inventory load error:", err)
         setError(err.message || "Failed to load inventory data")
       } finally {
         setLoading(false)
@@ -31,11 +30,15 @@ export default function Inventory() {
     loadData()
   }, [])
 
+  const goToProduct = (name: string) => {
+    nav(`/medicines?search=${encodeURIComponent(name)}`)
+  }
+
   return (
     <div className="max-w-6xl">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-800 dark:text-white">Inventory Alerts</h1>
-        <p className="text-sm text-slate-500">Monitor low stock and near-expiry items.</p>
+        <p className="text-sm text-slate-500">Monitor low stock and near-expiry items. Click an item to view it.</p>
       </div>
 
       {error && (
@@ -47,8 +50,7 @@ export default function Inventory() {
       {loading ? (
         <div className="text-center py-20 text-slate-400">Loading inventory alerts...</div>
       ) : (
-        <div className="grid grid-cols-2 gap-6">
-          {/* LOW STOCK TABLE */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
             <div className="p-4 border-b border-slate-200 dark:border-slate-700 bg-red-50 dark:bg-red-900/20 flex items-center justify-between">
               <h3 className="font-bold text-red-700 dark:text-red-400 flex items-center gap-2"><AlertTriangle size={18}/> Low Stock Alert</h3>
@@ -61,8 +63,8 @@ export default function Inventory() {
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                   {lowStock.map(m => (
-                    <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                      <td className="px-4 py-3 font-bold text-slate-800 dark:text-white">{m.name}</td>
+                    <tr key={m.id} onClick={() => goToProduct(m.name)} className="hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer transition-colors">
+                      <td className="px-4 py-3 font-bold text-emerald-600 dark:text-emerald-400 hover:underline">{m.name}</td>
                       <td className="px-4 py-3 text-center font-black text-red-600">{m.qty}</td>
                     </tr>
                   ))}
@@ -72,7 +74,6 @@ export default function Inventory() {
             </div>
           </div>
 
-          {/* EXPIRING TABLE */}
           <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
             <div className="p-4 border-b border-slate-200 dark:border-slate-700 bg-amber-50 dark:bg-amber-900/20 flex items-center justify-between">
               <h3 className="font-bold text-amber-700 dark:text-amber-400 flex items-center gap-2"><Clock size={18}/> Expiring Soon (90 Days)</h3>
@@ -85,8 +86,8 @@ export default function Inventory() {
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
                   {expiring.map(b => (
-                    <tr key={b.id} className="hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                      <td className="px-4 py-3 font-bold text-slate-800 dark:text-white">{b.medicine_name}</td>
+                    <tr key={b.id} onClick={() => goToProduct(b.medicine_name)} className="hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer transition-colors">
+                      <td className="px-4 py-3 font-bold text-emerald-600 dark:text-emerald-400 hover:underline">{b.medicine_name}</td>
                       <td className="px-4 py-3 font-mono text-slate-500">{b.batch_no}</td>
                       <td className="px-4 py-3 text-center">
                         <span className="bg-amber-100 text-amber-700 font-bold px-2 py-1 rounded text-xs">{b.expiry_date}</span>

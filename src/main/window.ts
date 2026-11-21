@@ -1,7 +1,7 @@
 import { BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import icon from '../../resources/icon.png?asset' // <--- THIS LINE IS CRITICAL
+import icon from '../../resources/icon.png?asset'
 
 export function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -9,7 +9,7 @@ export function createWindow(): BrowserWindow {
     height: 900,
     show: false,
     autoHideMenuBar: true,
-    icon: icon, // <--- THIS LINE IS CRITICAL
+    icon: icon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -18,7 +18,11 @@ export function createWindow(): BrowserWindow {
     }
   })
 
-  win.on('ready-to-show', () => win.show())
+  // Open maximized automatically and force Windows focus
+  win.maximize()
+  win.show()
+  win.focus() 
+
   win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
